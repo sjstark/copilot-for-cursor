@@ -1,116 +1,238 @@
 # 🚀 Copilot Proxy for Cursor
 
+> Forked from [jacksonkasi1/copilot-for-cursor](https://github.com/jacksonkasi1/copilot-for-cursor) with full Anthropic → OpenAI conversion + Responses API bridge.
+
 **Unlock the full power of GitHub Copilot in Cursor IDE.**
 
-This project provides a local proxy server that acts as a bridge between Cursor and GitHub Copilot. It solves key limitations by:
-1.  **Bypassing Cursor's Model Routing:** Using a custom prefix (`cus-`) to force Cursor to use your own API endpoint instead of its internal backend.
-2.  **Enabling Agentic Capabilities:** Transforming Cursor's Anthropic-style tool calls into OpenAI-compatible formats that Copilot understands. This enables **File Editing, Terminal Execution, Codebase Search, and MCP Tools**.
-3.  **Fixing Schema Errors:** Automatically sanitizing requests to prevent `400 Bad Request` errors caused by format mismatches (e.g., `tool_choice`, `cache_control`).
+Use **all** Copilot models (GPT-5.4, Claude Opus 4.6, Gemini 3.1, etc.) in Cursor — including Plan mode, Agent mode, and tool calls.
+
+---
+
+## ⚡ Quick Start
+
+### One Command (npm)
+
+```bash
+npx copilot-for-cursor
+```
+
+> Requires [Bun](https://bun.sh/) installed. First run will prompt GitHub authentication.
+
+This starts both `copilot-api` (port 4141) and the proxy (port 4142) in a single terminal.
+
+### Or from source
+
+```bash
+git clone https://github.com/CharlesYWL/copilot-for-cursor.git
+cd copilot-for-cursor
+bun run start.ts
+```
+
+### Enable Max Mode (auto-compact long conversations)
+
+```bash
+bun run start.ts --max
+```
+
+> **Max mode** automatically compacts conversation history when the estimated token count exceeds 80% of the model's input token limit. It summarizes older messages into a structured summary while keeping the most recent messages intact — letting you have much longer coding sessions without hitting token limits.
+
+> **🛡️ Always-on safety net:** Even without `--max`, the proxy now auto-compacts at **95%** of the model's input limit and falls back to hard truncation of the oldest messages if summarization fails. This prevents Cursor from ever hitting upstream `context_length_exceeded` errors. Use `--max` if you want proactive (80%) compaction for smoother long sessions.
+
+### Then start an HTTPS tunnel
+
+Cursor requires HTTPS. You have two options:
+
+**Option A — One-click tunnel (recommended)**
+
+Open the dashboard at `http://localhost:4142/`, go to the **Tunnel** tab, pick a provider (Cloudflare, ngrok, or bore) and click **Start Tunnel**. The public URL, QR code, and Cursor endpoint will appear instantly. Cloudflare is pre-installed automatically — no signup, no config.
+
+**Option B — Run a tunnel manually**
+
+```bash
+# Cloudflare (free, no signup)
+cloudflared tunnel --url http://localhost:4142
+
+# Or ngrok
+ngrok http 4142
+```
+
+Copy the HTTPS URL (e.g., `https://xxxxx.trycloudflare.com`).
 
 ---
 
 ## 🏗 Architecture
 
-*   **Port 4141 (`copilot-api`):** The core service that authenticates with GitHub and provides the OpenAI-compatible API.
-    *   *Powered by the open-source [copilot-api](https://github.com/ericc-ch/copilot-api) project. Our setup script automatically handles the installation and execution of this package.*
-*   **Port 4142 (`proxy-router`):** The intelligence layer. It intercepts requests, transforms schemas, handles the "loophole" prefix, and serves the dashboard.
-
----
-
-## 🛠 Setup Guide
-
-### 1. Prerequisites
-*   Node.js & npm
-*   Bun (`curl -fsSL https://bun.sh/install | bash`)
-*   ngrok (for HTTPS tunneling required by Cursor)
-
-### 2. Installation & Auto-Start (macOS)
-Run these scripts once to set up persistent background services. They will start automatically on boot and restart if they crash.
-
-**Note:** The `setup-copilot-service.sh` script will automatically install and run the upstream `copilot-api` via `npx`, so you don't need to clone that repository manually.
-
-```bash
-# 1. Setup Core API (Port 4141)
-chmod +x setup-copilot-service.sh
-./setup-copilot-service.sh
-
-# 2. Setup Proxy Router (Port 4142)
-chmod +x setup-proxy-service.sh
-./setup-proxy-service.sh
+```text
+Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → GitHub Copilot
 ```
 
-### 3. Verify Services
-Check if the dashboard is running:
-👉 **[http://localhost:4142](http://localhost:4142)**
+*   **Port 4141 (`copilot-api`):** Authenticates with GitHub, provides the OpenAI-compatible API, and natively handles the Responses API for GPT-5.x models.
+    *   *Powered by [@jeffreycao/copilot-api](https://github.com/caozhiyuan/copilot-api) (installed via `npx`).*
+*   **Port 4142 (`proxy-router`):** Converts Anthropic-format messages to OpenAI format, bridges Responses API for GPT-5.x models, handles the `cus-` prefix, and serves the dashboard.
+*   **HTTPS tunnel:** Cursor requires HTTPS — a tunnel exposes the local proxy.
 
-**Dashboard Preview:**
+### Proxy Router Modules
 
-![Dashboard Preview](./dashboard-preview.png)
+| File | Responsibility |
+|---|---|
+| `proxy-router.ts` | Entrypoint — Bun.serve, routing, CORS, dashboard, model list |
+| `anthropic-transforms.ts` | Anthropic → OpenAI normalization (fields, tools, messages) |
+| `responses-bridge.ts` | Chat Completions → Responses API bridge for GPT-5.x / goldeneye |
+| `responses-converters.ts` | Responses API → Chat Completions format (sync & streaming SSE) |
+| `stream-proxy.ts` | Streaming passthrough with chunk logging and error detection |
+| `debug-logger.ts` | Request/response debug logging helpers |
+| `start.ts` | One-command launcher for copilot-api + proxy-router |
+| `max-mode.ts` | Auto-compaction for long conversations (`--max` flag) |
+| `usage-db.ts` | Persistent request/token usage tracking |
+| `auth-config.ts` | API key generation, validation, and config persistence |
+| `upstream-auth.ts` | Upstream copilot-api authentication and key management |
 
 ---
 
 ## ⚙️ Cursor Configuration
 
-Cursor requires an HTTPS endpoint. We use `ngrok` to expose our local proxy.
+1.  Go to **Settings** (Gear Icon) → **Models**.
+2.  Add a new **OpenAI Compatible** model:
+    *   **Base URL:** `https://your-tunnel-url.trycloudflare.com/v1`
+    *   **API Key:** `dummy` (any value works)
+    *   **Model Name:** Use a **prefixed name** — e.g., `cus-gpt-5.4`, `cus-claude-opus-4.6`
 
-1.  **Start ngrok:**
-    ```bash
-    ngrok http 4142
-    ```
-    *Copy the HTTPS URL provided by ngrok (e.g., `https://your-url.ngrok-free.app`).*
+> **⚠️ Important:** You **must** use the `cus-` prefix. Without it, Cursor routes the request to its own backend.
 
-2.  **Configure Cursor:**
-    *   Go to **Settings** (Gear Icon) -> **Models**.
-    *   Toggle **OFF** "Copilot" (optional, to avoid conflicts).
-    *   Add a new **OpenAI Compatible** model:
-        *   **Base URL:** `https://your-ngrok-url.ngrok-free.app/v1`
-        *   **API Key:** `dummy` (any value works)
-        *   **Model Name:** Use a **prefixed name** (e.g., `cus-claude-sonnet-4.5`).
+> **💡 Tip:** Visit the [Dashboard](http://localhost:4142) to see all available models and copy their IDs.
 
-    > **💡 Tip:** Go to the [Dashboard](http://localhost:4142) to see all available models and copy their IDs.
+### Tested Models (19/20 passing)
 
-    **Configuration Screenshot:**
-    
-    ![Cursor Settings Configuration](./cursor-settings.png)
+| Cursor Model Name | Actual Model | Status |
+|---|---|---|
+| `cus-gpt-4o` | GPT-4o | ✅ |
+| `cus-gpt-4.1` | GPT-4.1 | ✅ |
+| `cus-gpt-41-copilot` | GPT-4.1 Copilot | ❌ Not supported by GitHub |
+| `cus-gpt-5-mini` | GPT-5 Mini | ✅ |
+| `cus-gpt-5.1` | GPT-5.1 | ✅ (deprecating 2026-04-15) |
+| `cus-gpt-5.2` | GPT-5.2 | ✅ |
+| `cus-gpt-5.2-codex` | GPT-5.2 Codex | ✅ |
+| `cus-gpt-5.3-codex` | GPT-5.3 Codex | ✅ |
+| `cus-gpt-5.4` | GPT-5.4 | ✅ |
+| `cus-gpt-5.4-mini` | GPT-5.4 Mini | ✅ |
+| `cus-claude-haiku-4.5` | Claude Haiku 4.5 | ✅ |
+| `cus-claude-sonnet-4` | Claude Sonnet 4 | ✅ |
+| `cus-claude-sonnet-4.5` | Claude Sonnet 4.5 | ✅ |
+| `cus-claude-sonnet-4.6` | Claude Sonnet 4.6 | ✅ |
+| `cus-claude-opus-4.5` | Claude Opus 4.5 | ✅ |
+| `cus-claude-opus-4.6` | Claude Opus 4.6 | ✅ |
+| `cus-gemini-2.5-pro` | Gemini 2.5 Pro | ✅ |
+| `cus-gemini-3-flash-preview` | Gemini 3 Flash | ✅ |
+| `cus-gemini-3.1-pro-preview` | Gemini 3.1 Pro | ✅ |
+| `cus-text-embedding-3-small` | Text Embedding 3 Small | N/A (embedding model) |
 
----
+> All GPT-5.x models now work thanks to the switch to [@jeffreycao/copilot-api](https://github.com/caozhiyuan/copilot-api), which natively supports the Responses API. The proxy also includes its own Responses API bridge as a fallback.
 
-## ✨ Features & Supported Tools
-
-This proxy enables **full agentic workflows**. The following capabilities are fully supported:
-
-*   **💬 Chat & Reasoning:** Full conversation context with standard models.
-*   **📂 File System:** `Read`, `Write`, `StrReplace`, `Delete`.
-*   **💻 Terminal:** `Shell` (Run commands).
-*   **🔍 Search:** `Grep`, `Glob`, `SemanticSearch`.
-*   **🔌 MCP Tools:** Full support for external tools like Neon, Playwright, etc.
-
----
-
-## ⚠️ Known Limitations: Claude Vision Support
-
-There is a known server-side limitation with **Claude models** via the GitHub Copilot API.
-
-*   **Gemini / GPT-4o:** Full Vision Support (Images work perfectly).
-*   **Claude (via Copilot):** Does **NOT** support images via the API proxy. Requests containing images will be rejected by GitHub with `400 Bad Request`.
-
-**The Workaround (Implemented in Proxy):**
-To prevent crashes, the proxy automatically **strips images** from requests sent to Claude models. Claude will see a placeholder `[Image Omitted]` instead.
-
-**Suggested Workflow:**
-1.  **Need Vision?** Use `cus-gemini-3-flash-preview` or `cus-gpt-4o`.
-2.  **Need Coding Smarts?** Use `cus-claude-sonnet-4.5`.
-3.  **Switching Context:** If you start with Gemini (image) and want to switch to Claude, consider **duplicating the chat** (Cursor feature) or starting a fresh chat to ensure a clean context without image dependencies.
-
-> **💡 Help Wanted:** If you know how to get Claude Vision working via the unofficial Copilot API, please open an Issue or PR!
+![Cursor Settings Configuration](./cursor-settings.png)
 
 ---
 
-### 📝 Logs
-If you encounter issues, check the logs:
-*   Proxy: `tail -f ~/Library/Logs/copilot-proxy.log`
-*   API: `tail -f ~/Library/Logs/copilot-api.log`
+## ✨ Features
+
+### What the proxy handles
+
+| Cursor sends (Anthropic format) | Proxy converts to (OpenAI format) |
+|---|---|
+| `system` as top-level field | System message |
+| `tool_use` blocks in assistant messages | `tool_calls` array |
+| `tool_result` blocks in user messages | `tool` role messages |
+| `input_schema` on tools | `parameters` (cleaned) |
+| `tool_choice` objects (`auto`/`any`/`tool`) | OpenAI format (`auto`/`required`/function) |
+| `stop_sequences` | `stop` |
+| `thinking` / `cache_control` blocks | Stripped |
+| `metadata` / `anthropic_version` | Stripped |
+| Images in Claude requests | `[Image Omitted]` placeholder |
+| GPT-5.x `max_tokens` | Converted to `max_completion_tokens` |
+| GPT-5.x Responses API | **Bridge built in** (needs `copilot-api` support) |
+
+### Supported Workflows
+
+*   **💬 Chat & Reasoning:** Full conversation context with all models
+*   **📋 Plan Mode:** Works with tool calls and multi-turn conversations
+*   **🤖 Agent Mode:** File editing, terminal, search, MCP tools
+*   **📂 File System:** `Read`, `Write`, `StrReplace`, `Delete`
+*   **💻 Terminal:** `Shell` (run commands)
+*   **🔍 Search:** `Grep`, `Glob`, `SemanticSearch`
+*   **🔌 MCP Tools:** External tools (Neon, Playwright, etc.)
+*   **🗜️ Max Mode:** Auto-compact long conversations to stay within token limits (`--max`)
 
 ---
 
-> ⚠️ **DISCLAIMER:** This project is **unofficial** and created for **educational purposes only**. It interacts with undocumented internal APIs of GitHub Copilot and Cursor. Use at your own risk. The authors are not affiliated with GitHub, Microsoft, or Anysphere (Cursor). Please use your API credits responsibly and in accordance with the provider's Terms of Service.
+## 🔒 Security
+
+### Dashboard Password
+
+The dashboard is password-protected. On first visit, set a password to prevent unauthorized access.
+
+### API Key Management
+
+Manage API keys directly from the **Endpoint** tab in the dashboard:
+
+1. Toggle **"Require API Key"** to enable authentication
+2. Click **"+ Create Key"** to generate a new `cpk-xxx` key
+3. Copy the key (shown only once!) and paste it into Cursor's **API Key** field
+4. Enable/disable or delete keys as needed
+
+When enabled, all `/v1/*` requests must include `Authorization: Bearer <your-key>`.
+
+![Dashboard](./dashboard-preview.png)
+
+| Usage Tab | Console Log Tab |
+|---|---|
+| ![Usage](./screenshot-usage.png) | ![Console](./screenshot-console.png) |
+
+---
+
+## 📊 Dashboard
+
+Access the dashboard at **[http://localhost:4142](http://localhost:4142)**
+
+Three tabs:
+- **Endpoint** — Proxy URL, API key management, model list
+- **Usage** — Request stats, token counts, per-model breakdown, recent requests
+- **Console Log** — Real-time proxy logs with color-coded levels
+
+---
+
+## ⚠️ Known Limitations
+
+| Feature | Status |
+|---|---|
+| Basic chat & tool calling | ✅ Works |
+| Streaming | ✅ Works |
+| Plan mode | ✅ Works |
+| Agent mode | ✅ Works |
+| All GPT-5.x models | ✅ Works |
+| Max mode (long session compaction) | ✅ Works (`--max` flag) |
+| Extended thinking (chain-of-thought) | ❌ Stripped |
+| Prompt caching (`cache_control`) | ❌ Stripped |
+| Claude Vision | ❌ Not supported via Copilot |
+| Tunnel URL changes on restart | ⚠️ Use paid plan for fixed subdomain |
+
+---
+
+## 📝 Troubleshooting
+
+**"Model name is not valid" in Cursor:**
+Make sure you're using the `cus-` prefix (e.g., `cus-gpt-5.4`, not `gpt-5.4`).
+
+**Plan mode response cuts off:**
+Ensure `idleTimeout: 255` is set in `proxy-router.ts` (already configured). Slow models like Opus need longer timeouts.
+
+**GPT-5.x returns "use /v1/responses":**
+The proxy auto-routes these. Make sure you're running the latest version.
+
+**"connection refused":**
+Ensure services are running: `bun run start.ts` or check `http://localhost:4142`.
+
+**Max mode not compacting:**
+Compaction only triggers when estimated tokens exceed 80% of the model's limit and there are at least 15 messages. Check the console log for `🗜️ Max mode` messages.
+
+---
+
+> ⚠️ **DISCLAIMER:** This project is **unofficial** and for **educational purposes only**. It interacts with undocumented internal APIs of GitHub Copilot and Cursor. Use at your own risk. The authors are not affiliated with GitHub, Microsoft, or Anysphere (Cursor). Please use your API credits responsibly and in accordance with the provider's Terms of Service.
