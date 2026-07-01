@@ -6,7 +6,7 @@ import { addRequestLog, getNextRequestId, getUsageStats, flushToDisk, type Reque
 import { loadAuthConfig, saveAuthConfig, generateApiKey, validateApiKey } from './auth-config';
 import { getUpstreamAuthHeader, getUpstreamApiKeys, createUpstreamApiKey, deleteUpstreamApiKey } from './upstream-auth';
 import { compactIfNeeded, isMaxMode } from './max-mode';
-import { needsResponsesAPI } from './model-routing';
+import { needsResponsesAPI, normalizeModelId } from './model-routing';
 import { getTunnelState, startTunnel, stopTunnel, subscribeTunnel, type TunnelProvider } from './tunnel';
 
 // ── Console capture for SSE streaming ─────────────────────────────────────────
@@ -256,11 +256,14 @@ Bun.serve({
             });
             const data = await response.json();
             if (data.data && Array.isArray(data.data)) {
-                data.data = data.data.map((model: any) => ({
-                    ...model,
-                    id: PREFIX + model.id,
-                    display_name: PREFIX + (model.display_name || model.id)
-                }));
+                data.data = data.data.map((model: any) => {
+                    const normalizedId = normalizeModelId(model.id);
+                    return {
+                        ...model,
+                        id: PREFIX + normalizedId,
+                        display_name: PREFIX + normalizeModelId(model.display_name || model.id)
+                    };
+                });
             }
             return new Response(JSON.stringify(data), {
                 status: response.status,
@@ -311,6 +314,7 @@ Bun.serve({
 
         if (json.model && json.model.startsWith(PREFIX)) {
           targetModel = json.model.slice(PREFIX.length);
+          targetModel = normalizeModelId(targetModel);
           json.model = targetModel;
           console.log(`🔄 Rewriting model: ${originalModel} -> ${json.model}`);
         }
@@ -434,11 +438,14 @@ Bun.serve({
         const data = await response.json();
         
         if (data.data && Array.isArray(data.data)) {
-          data.data = data.data.map((model: any) => ({
-            ...model,
-            id: PREFIX + model.id,
-            display_name: PREFIX + (model.display_name || model.id)
-          }));
+          data.data = data.data.map((model: any) => {
+            const normalizedId = normalizeModelId(model.id);
+            return {
+                ...model,
+                id: PREFIX + normalizedId,
+                display_name: PREFIX + normalizeModelId(model.display_name || model.id)
+            };
+          });
         }
         return new Response(JSON.stringify(data), {
             status: response.status,
