@@ -4,6 +4,31 @@ export interface StreamUsageResult {
     totalTokens: number;
 }
 
+/** Remove Copilot adaptive-thinking fields that Cursor doesn't understand. */
+function sanitizeStreamChunk(rawChunk: string): string {
+    if (!rawChunk.includes('reasoning_')) return rawChunk;
+
+    return rawChunk.split('\n').map(line => {
+        if (!line.startsWith('data:')) return line;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') return line;
+        try {
+            const parsed = JSON.parse(payload);
+            if (parsed?.choices?.length) {
+                for (const choice of parsed.choices) {
+                    if (choice.delta) {
+                        delete choice.delta.reasoning_text;
+                        delete choice.delta.reasoning_opaque;
+                    }
+                }
+            }
+            return `data: ${JSON.stringify(parsed)}`;
+        } catch {
+            return line;
+        }
+    }).join('\n');
+}
+
 export const createStreamProxy = (
     responseBody: ReadableStream<Uint8Array>,
     responseHeaders: Headers,
@@ -60,7 +85,8 @@ export const createStreamProxy = (
                         }
                     } catch { /* ignore parse errors in partial chunks */ }
                 }
-                controller.enqueue(value);
+                const sanitized = sanitizeStreamChunk(lastChunkData);
+                controller.enqueue(new TextEncoder().encode(sanitized));
             } catch (err: any) {
                 if (err?.code === 'ERR_INVALID_THIS') return;
                 console.error(`❌ Stream read error at chunk ${chunkCount}:`, err);

@@ -1,5 +1,5 @@
 import { getUpstreamAuthHeader } from './upstream-auth';
-import { needsResponsesAPI } from './model-routing';
+import { needsResponsesAPI, normalizeModelId } from './model-routing';
 
 // ── Global config ─────────────────────────────────────────────────────────────
 let maxModeEnabled = false;
@@ -53,10 +53,14 @@ export async function fetchAndCacheModelLimits(targetUrl: string): Promise<void>
         for (const model of data.data) {
             const limits = model.capabilities?.limits;
             if (limits) {
-                modelLimitsCache.set(model.id, {
+                const entry = {
                     maxInputTokens: limits.max_prompt_tokens || limits.max_input_tokens || getDefaultLimits(model.id).maxInputTokens,
                     maxOutputTokens: limits.max_output_tokens || getDefaultLimits(model.id).maxOutputTokens,
-                });
+                };
+                // Upstream lists dash IDs (4-6) but chat accepts dot IDs (4.6) — cache both.
+                modelLimitsCache.set(model.id, entry);
+                const normalizedId = normalizeModelId(model.id);
+                if (normalizedId !== model.id) modelLimitsCache.set(normalizedId, entry);
             }
         }
         console.log(`📋 Max mode: cached token limits for ${modelLimitsCache.size} models`);

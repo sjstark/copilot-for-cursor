@@ -7,8 +7,9 @@
 import { spawn, sleep } from 'bun';
 import { existsSync } from 'fs';
 import { getUpstreamAuthHeader } from './upstream-auth';
-import { enableMaxMode, isMaxMode, fetchAndCacheModelLimits } from './max-mode';
-import { stopTunnel } from './tunnel';
+import { fetchAndCacheModelLimits, enableMaxMode, isMaxMode } from './max-mode';
+import { configureCursorOpenAIBaseUrl, notifyMac } from './cursor-settings';
+import { getCursorEndpoint, getPublicUrl, shouldAutoConfigureCursor } from './public-config';
 
 // ── Parse CLI flags ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -117,11 +118,42 @@ async function main() {
     }
     await fetchAndCacheModelLimits(`http://localhost:${COPILOT_API_PORT}`);
 
+    const publicUrl = getPublicUrl();
+    const cursorEndpoint = getCursorEndpoint();
+    console.log(`${CYAN}🌐 Public URL: ${publicUrl}${RESET}`);
+    console.log(`${CYAN}   Cursor endpoint: ${cursorEndpoint}${RESET}`);
+
+    // Auto-populate Cursor with all available cus-* models on every startup
+    let modelIds: string[] = [];
+    try {
+        const modelsResp = await fetch(`http://localhost:${COPILOT_API_PORT}/v1/models`, {
+            headers: { 'Authorization': getUpstreamAuthHeader() },
+        });
+        if (modelsResp.ok) {
+            const modelsData = await modelsResp.json() as { data?: Array<{ id?: string }> };
+            modelIds = (modelsData.data || [])
+                .map(m => m.id)
+                .filter((id): id is string => typeof id === 'string' && id.startsWith('cus-'));
+        }
+    } catch {}
+
+    if (modelIds.length > 0) {
+        const result = configureCursorOpenAIBaseUrl(cursorEndpoint, modelIds);
+        if (result.ok) {
+            console.log(`${GREEN}✅ ${result.message}${RESET}`);
+            console.log(`${GREEN}   Registered ${modelIds.length} models: ${modelIds.slice(0, 3).join(', ')}${modelIds.length > 3 ? ', ...' : ''}${RESET}`);
+        } else {
+            console.log(`${YELLOW}⚠️  Cursor auto-config skipped: ${result.message}${RESET}`);
+        }
+    }
+
     // 2. Check if proxy is already running
     const proxyAlreadyRunning = await isPortInUse(PROXY_PORT);
     if (proxyAlreadyRunning) {
         console.log(`${GREEN}✅ proxy-router already running on port ${PROXY_PORT}${RESET}`);
-        console.log(`\n${CYAN}🎉 Everything is running! Configure Cursor to use: http://localhost:${PROXY_PORT}/v1${RESET}`);
+        console.log(`\n${CYAN}🎉 Everything is running!${RESET}`);
+        console.log(`${CYAN}   Local:  http://localhost:${PROXY_PORT}/v1${RESET}`);
+        console.log(`${CYAN}   Public: ${cursorEndpoint}${RESET}`);
         // Keep alive if we started copilot-api
         if (copilotProc) await copilotProc.exited;
         return;
@@ -135,17 +167,18 @@ async function main() {
     console.log(`${CYAN}   copilot-api:   http://localhost:${COPILOT_API_PORT}${RESET}`);
     console.log(`${CYAN}   proxy-router:  http://localhost:${PROXY_PORT}${RESET}`);
     console.log(`${CYAN}   dashboard:     http://localhost:${PROXY_PORT}/${RESET}`);
-    console.log(`${CYAN}   Cursor config: http://localhost:${PROXY_PORT}/v1${RESET}`);
+    console.log(`${CYAN}   Local Cursor:  http://localhost:${PROXY_PORT}/v1${RESET}`);
+    console.log(`${CYAN}   Public Cursor: ${cursorEndpoint}${RESET}`);
+
+    notifyMac('Copilot for Cursor', `Ready: ${cursorEndpoint}`);
 
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
         console.log(`\n${YELLOW}🛑 Shutting down...${RESET}`);
-        try { await stopTunnel(); } catch {}
         if (copilotProc) copilotProc.kill();
         process.exit(0);
     });
     process.on('SIGTERM', async () => {
-        try { await stopTunnel(); } catch {}
         if (copilotProc) copilotProc.kill();
         process.exit(0);
     });

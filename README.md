@@ -4,7 +4,7 @@
 
 **Unlock the full power of GitHub Copilot in Cursor IDE.**
 
-Use **all** Copilot models (GPT-5.4, Claude Opus 4.6, Gemini 3.1, etc.) in Cursor — including Plan mode, Agent mode, and tool calls.
+Use **all** Copilot models (GPT-5.4, Claude Opus 4.8, Claude Fable 5, Gemini 3.1, etc.) in Cursor — including Plan mode, Agent mode, and tool calls.
 
 ---
 
@@ -38,38 +38,43 @@ bun run start.ts --max
 
 > **🛡️ Always-on safety net:** Even without `--max`, the proxy now auto-compacts at **95%** of the model's input limit and falls back to hard truncation of the oldest messages if summarization fails. This prevents Cursor from ever hitting upstream `context_length_exceeded` errors. Use `--max` if you want proactive (80%) compaction for smoother long sessions.
 
-### Then start an HTTPS tunnel
+### Then configure Cursor
 
-Cursor requires HTTPS. You have two options:
+Cursor requires HTTPS. This project uses a **fixed Cloudflare tunnel** at:
 
-**Option A — One-click tunnel (recommended)**
+**`https://copilot-for-cursor.samstark.me/v1`**
 
-Open the dashboard at `http://localhost:4142/`, go to the **Tunnel** tab, pick a provider (Cloudflare, ngrok, or bore) and click **Start Tunnel**. The public URL, QR code, and Cursor endpoint will appear instantly. Cloudflare is pre-installed automatically — no signup, no config.
+The tunnel runs as a separate system service on your machine and forwards to port 4142. You do **not** need ngrok or a quick Cloudflare tunnel from the dashboard.
 
-**Option B — Run a tunnel manually**
+On startup, `start.ts` automatically writes the public URL into Cursor's settings (macOS). You can also click **Apply to Cursor** on the dashboard Tunnel tab.
+
+### Auto-start at login (macOS)
 
 ```bash
-# Cloudflare (free, no signup)
-cloudflared tunnel --url http://localhost:4142
-
-# Or ngrok
-ngrok http 4142
+./scripts/install-launch-agent.sh
 ```
 
-Copy the HTTPS URL (e.g., `https://xxxxx.trycloudflare.com`).
+This installs a LaunchAgent that runs `bun run start.ts --configure-cursor` from this repo at login. To remove it:
+
+```bash
+./scripts/uninstall-launch-agent.sh
+```
+
+Logs: `~/.local/share/copilot-for-cursor/`
+Config: `~/.copilot-proxy/config.json`
 
 ---
 
 ## 🏗 Architecture
 
 ```text
-Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → GitHub Copilot
+Cursor → (Cloudflare tunnel) → proxy-router (:4142) → copilot-api (:4141) → GitHub Copilot
 ```
 
 *   **Port 4141 (`copilot-api`):** Authenticates with GitHub, provides the OpenAI-compatible API, and natively handles the Responses API for GPT-5.x models.
     *   *Powered by [@jeffreycao/copilot-api](https://github.com/caozhiyuan/copilot-api) (installed via `npx`).*
 *   **Port 4142 (`proxy-router`):** Converts Anthropic-format messages to OpenAI format, bridges Responses API for GPT-5.x models, handles the `cus-` prefix, and serves the dashboard.
-*   **HTTPS tunnel:** Cursor requires HTTPS — a tunnel exposes the local proxy.
+*   **Cloudflare tunnel:** Runs as a system service — forwards `https://copilot-for-cursor.samstark.me` to localhost:4142.
 
 ### Proxy Router Modules
 
@@ -86,6 +91,10 @@ Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → G
 | `usage-db.ts` | Persistent request/token usage tracking |
 | `auth-config.ts` | API key generation, validation, and config persistence |
 | `upstream-auth.ts` | Upstream copilot-api authentication and key management |
+| `public-config.ts` | Public URL from env / `~/.copilot-proxy/config.json` |
+| `cursor-settings.ts` | Writes Cursor OpenAI base URL override (macOS) |
+| `tunnel.ts` | Static public endpoint info for dashboard |
+| `scripts/install-launch-agent.sh` | macOS auto-start at login |
 
 ---
 
@@ -93,7 +102,7 @@ Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → G
 
 1.  Go to **Settings** (Gear Icon) → **Models**.
 2.  Add a new **OpenAI Compatible** model:
-    *   **Base URL:** `https://your-tunnel-url.trycloudflare.com/v1`
+    *   **Base URL:** `https://copilot-for-cursor.samstark.me/v1`
     *   **API Key:** `dummy` (any value works)
     *   **Model Name:** Use a **prefixed name** — e.g., `cus-gpt-5.4`, `cus-claude-opus-4.6`
 
@@ -101,7 +110,7 @@ Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → G
 
 > **💡 Tip:** Visit the [Dashboard](http://localhost:4142) to see all available models and copy their IDs.
 
-### Tested Models (19/20 passing)
+### Tested Models (20/21 passing)
 
 | Cursor Model Name | Actual Model | Status |
 |---|---|---|
@@ -121,6 +130,7 @@ Cursor → (HTTPS tunnel) → proxy-router (:4142) → copilot-api (:4141) → G
 | `cus-claude-sonnet-4.6` | Claude Sonnet 4.6 | ✅ |
 | `cus-claude-opus-4.5` | Claude Opus 4.5 | ✅ |
 | `cus-claude-opus-4.6` | Claude Opus 4.6 | ✅ |
+| `cus-claude-fable-5` | Claude Fable 5 | ✅ |
 | `cus-gemini-2.5-pro` | Gemini 2.5 Pro | ✅ |
 | `cus-gemini-3-flash-preview` | Gemini 3 Flash | ✅ |
 | `cus-gemini-3.1-pro-preview` | Gemini 3.1 Pro | ✅ |
@@ -212,7 +222,7 @@ Three tabs:
 | Extended thinking (chain-of-thought) | ❌ Stripped |
 | Prompt caching (`cache_control`) | ❌ Stripped |
 | Claude Vision | ❌ Not supported via Copilot |
-| Tunnel URL changes on restart | ⚠️ Use paid plan for fixed subdomain |
+| Public URL override | Set `PUBLIC_URL` env or `~/.copilot-proxy/config.json` |
 
 ---
 

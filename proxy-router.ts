@@ -6,8 +6,8 @@ import { addRequestLog, getNextRequestId, getUsageStats, flushToDisk, type Reque
 import { loadAuthConfig, saveAuthConfig, generateApiKey, validateApiKey } from './auth-config';
 import { getUpstreamAuthHeader, getUpstreamApiKeys, createUpstreamApiKey, deleteUpstreamApiKey } from './upstream-auth';
 import { compactIfNeeded, isMaxMode } from './max-mode';
-import { needsResponsesAPI, normalizeModelId } from './model-routing';
-import { getTunnelState, startTunnel, stopTunnel, subscribeTunnel, type TunnelProvider } from './tunnel';
+import { needsResponsesAPI, normalizeModelId, resolveModelForUpstream, needsLowReasoningEffort } from './model-routing';
+import { getTunnelState, configureCursor, subscribeTunnel } from './tunnel';
 
 // ── Console capture for SSE streaming ─────────────────────────────────────────
 interface ConsoleLine {
@@ -200,25 +200,23 @@ Bun.serve({
         return Response.json({ error: 'Key not found' }, { status: 404, headers: corsHeaders });
     }
 
-    // ── Dashboard API: tunnel management ──────────────────────────────
+    // ── Dashboard API: public tunnel info ─────────────────────────────
     if (url.pathname === "/api/tunnel" && req.method === "GET") {
         return Response.json(getTunnelState(), { headers: corsHeaders });
     }
-    if (url.pathname === "/api/tunnel" && req.method === "POST") {
-        try {
-            const body = await req.json() as { provider?: TunnelProvider; authtoken?: string };
-            if (!body.provider || !['cloudflared', 'ngrok', 'bore'].includes(body.provider)) {
-                return Response.json({ error: 'Invalid provider' }, { status: 400, headers: corsHeaders });
-            }
-            startTunnel(body.provider, { authtoken: body.authtoken }).catch(() => {});
-            return Response.json(getTunnelState(), { headers: corsHeaders });
-        } catch (e: any) {
-            return Response.json({ error: e?.message || 'Failed to start tunnel' }, { status: 500, headers: corsHeaders });
-        }
+    if (url.pathname === "/api/tunnel/configure-cursor" && req.method === "POST") {
+        const result = configureCursor();
+        return Response.json(result, {
+            status: result.ok ? 200 : 400,
+            headers: corsHeaders,
+        });
     }
-    if (url.pathname === "/api/tunnel" && req.method === "DELETE") {
-        await stopTunnel();
-        return Response.json(getTunnelState(), { headers: corsHeaders });
+    if (url.pathname === "/api/tunnel" && req.method === "POST") {
+        const result = configureCursor();
+        return Response.json(result, {
+            status: result.ok ? 200 : 400,
+            headers: corsHeaders,
+        });
     }
     if (url.pathname === "/api/tunnel/stream") {
         const stream = new ReadableStream({
@@ -310,13 +308,16 @@ Bun.serve({
         logIncomingRequest(json);
 
         const originalModel = json.model;
-        let targetModel = json.model;
+        const targetModel = resolveModelForUpstream(json.model || '', PREFIX);
+        json.model = targetModel;
+        if (originalModel !== targetModel) {
+          console.log(`🔄 Rewriting model: ${originalModel} -> ${targetModel}`);
+        }
 
-        if (json.model && json.model.startsWith(PREFIX)) {
-          targetModel = json.model.slice(PREFIX.length);
-          targetModel = normalizeModelId(targetModel);
-          json.model = targetModel;
-          console.log(`🔄 Rewriting model: ${originalModel} -> ${json.model}`);
+        // Claude 4.6 adaptive thinking streams empty content unless reasoning is capped.
+        if (needsLowReasoningEffort(targetModel) && json.reasoning_effort == null) {
+          json.reasoning_effort = 'low';
+          console.log(`🧠 Set reasoning_effort=low for ${targetModel}`);
         }
 
         const isClaude = targetModel.toLowerCase().includes('claude');
