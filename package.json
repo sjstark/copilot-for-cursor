@@ -1,7 +1,7 @@
 {
   "name": "copilot-for-cursor",
-  "version": "2.1.1",
-  "description": "Proxy that bridges GitHub Copilot API to Cursor IDE — translates Anthropic format, bridges Responses API for GPT 5.x, and more",
+  "version": "2.2.0",
+  "description": "Proxy that bridges GitHub Copilot API to Cursor IDE — translates Anthropic format, bridges Responses API for GPT 5.x, with cost tracking, auto-retry, and smart routing",
   "bin": {
     "copilot-for-cursor": "bin/cli.js"
   },
@@ -10,12 +10,25 @@
     "scripts/",
     "*.ts",
     "dashboard.html",
-    "README.md"
+    "README.md",
+    "DOCKER.md",
+    "CHANGELOG.md",
+    "Dockerfile",
+    "docker-compose.yml",
+    ".dockerignore"
   ],
   "scripts": {
     "build": "bun build start.ts --outdir dist --target node",
     "dev": "bun run start.ts",
-    "start": "bun dist/start.js"
+    "start": "bun dist/start.js",
+    "docker:build": "docker build -t copilot-for-cursor .",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "service:install": "./scripts/install-launch-agent.sh",
+    "service:restart": "./scripts/restart-service.sh",
+    "service:status": "./scripts/service-status.sh",
+    "service:uninstall": "./scripts/uninstall-launch-agent.sh"
   },
   "keywords": [
     "copilot",
@@ -23,7 +36,9 @@
     "proxy",
     "anthropic",
     "openai",
-    "responses-api"
+    "responses-api",
+    "cost-tracking",
+    "docker"
   ],
   "license": "MIT",
   "repository": {

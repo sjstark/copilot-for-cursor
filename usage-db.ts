@@ -2,6 +2,7 @@ import { mkdirSync, existsSync, readFileSync } from 'fs';
 import { writeFile } from 'fs/promises';
 import { homedir } from 'os';
 import { join } from 'path';
+import { calculateCost, trackSpending, type CostEstimate } from './cost-tracking';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +16,7 @@ export interface RequestLog {
     status: number;
     duration: number;
     stream: boolean;
+    cost?: CostEstimate; // Added cost tracking
 }
 
 interface DailySnapshot {
@@ -24,7 +26,15 @@ interface DailySnapshot {
     completionTokens: number;
     totalTokens: number;
     errors: number;
-    byModel: Record<string, { requests: number; promptTokens: number; completionTokens: number; totalTokens: number; errors: number }>;
+    totalCost: number; // Added cost tracking
+    byModel: Record<string, { 
+        requests: number; 
+        promptTokens: number; 
+        completionTokens: number; 
+        totalTokens: number; 
+        errors: number;
+        totalCost: number; // Added cost tracking
+    }>;
 }
 
 interface UsageData {
@@ -40,6 +50,7 @@ interface UsageData {
         completionTokens: number;
         totalTokens: number;
         errors: number;
+        totalCost: number; // Added cost tracking
     };
 }
 
@@ -69,7 +80,7 @@ const emptyData = (): UsageData => ({
     requestIdCounter: 0,
     recentRequests: [],
     dailySnapshots: [],
-    lifetimeTotals: { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0 },
+    lifetimeTotals: { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, totalCost: 0 },
 });
 
 // ── Persistence ──────────────────────────────────────────────────────────────
@@ -123,6 +134,12 @@ export const getNextRequestId = (): number => {
 };
 
 export const addRequestLog = (log: RequestLog) => {
+    // Calculate cost if not already present
+    if (!log.cost && log.promptTokens > 0) {
+        log.cost = calculateCost(log.model, log.promptTokens, log.completionTokens);
+        trackSpending(log.cost.totalCost);
+    }
+    
     data.recentRequests.push(log);
     if (data.recentRequests.length > MAX_RECENT_REQUESTS) {
         data.recentRequests.shift();
@@ -132,12 +149,13 @@ export const addRequestLog = (log: RequestLog) => {
     data.lifetimeTotals.promptTokens += log.promptTokens;
     data.lifetimeTotals.completionTokens += log.completionTokens;
     data.lifetimeTotals.totalTokens += log.totalTokens;
+    data.lifetimeTotals.totalCost = (data.lifetimeTotals.totalCost || 0) + (log.cost?.totalCost || 0);
     if (log.status >= 400) data.lifetimeTotals.errors++;
 
     const today = todayKey();
     let snap = data.dailySnapshots.find(s => s.date === today);
     if (!snap) {
-        snap = { date: today, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, byModel: {} };
+        snap = { date: today, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, totalCost: 0, byModel: {} };
         data.dailySnapshots.push(snap);
         if (data.dailySnapshots.length > MAX_DAILY_SNAPSHOTS) {
             data.dailySnapshots.shift();
@@ -147,16 +165,18 @@ export const addRequestLog = (log: RequestLog) => {
     snap.promptTokens += log.promptTokens;
     snap.completionTokens += log.completionTokens;
     snap.totalTokens += log.totalTokens;
+    snap.totalCost = (snap.totalCost || 0) + (log.cost?.totalCost || 0);
     if (log.status >= 400) snap.errors++;
 
     if (!snap.byModel[log.model]) {
-        snap.byModel[log.model] = { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0 };
+        snap.byModel[log.model] = { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, totalCost: 0 };
     }
     const m = snap.byModel[log.model];
     m.requests++;
     m.promptTokens += log.promptTokens;
     m.completionTokens += log.completionTokens;
     m.totalTokens += log.totalTokens;
+    m.totalCost = (m.totalCost || 0) + (log.cost?.totalCost || 0);
     if (log.status >= 400) m.errors++;
 
     scheduleSave();
@@ -168,7 +188,7 @@ export const getUsageStats = () => {
     const logs = data.recentRequests;
     const byModel = Object.entries(
         logs.reduce((acc, r) => {
-            if (!acc[r.model]) acc[r.model] = { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, totalDuration: 0, avgDuration: 0 };
+            if (!acc[r.model]) acc[r.model] = { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0, totalDuration: 0, avgDuration: 0, totalCost: 0 };
             acc[r.model].requests++;
             acc[r.model].promptTokens += r.promptTokens;
             acc[r.model].completionTokens += r.completionTokens;
@@ -176,6 +196,7 @@ export const getUsageStats = () => {
             if (r.status >= 400) acc[r.model].errors++;
             acc[r.model].totalDuration += r.duration;
             acc[r.model].avgDuration = Math.round(acc[r.model].totalDuration / acc[r.model].requests);
+            acc[r.model].totalCost = (acc[r.model].totalCost || 0) + (r.cost?.totalCost || 0);
             return acc;
         }, {} as Record<string, any>),
     ).map(([model, d]) => ({ model, ...d }));
@@ -185,6 +206,7 @@ export const getUsageStats = () => {
         totalPromptTokens: data.lifetimeTotals.promptTokens,
         totalCompletionTokens: data.lifetimeTotals.completionTokens,
         totalTokens: data.lifetimeTotals.totalTokens,
+        totalCost: data.lifetimeTotals.totalCost || 0,
         totalErrors: data.lifetimeTotals.errors,
         byModel,
         recentRequests: logs.slice(-50).reverse(),

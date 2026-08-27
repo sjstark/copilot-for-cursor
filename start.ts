@@ -8,8 +8,13 @@ import { spawn, sleep } from 'bun';
 import { existsSync } from 'fs';
 import { getUpstreamAuthHeader } from './upstream-auth';
 import { fetchAndCacheModelLimits, enableMaxMode, isMaxMode } from './max-mode';
+import { fetchAndCachePricing } from './cost-tracking';
 import { configureCursorOpenAIBaseUrl, notifyMac } from './cursor-settings';
 import { getCursorEndpoint, getPublicUrl, shouldAutoConfigureCursor } from './public-config';
+import { withCopilotPrefix, COPILOT_MODEL_PREFIX, normalizeModelId } from './model-routing';
+import { getPersonalUpstream, personalAuthHeader, personalModelsUrl, extraPersonalModelIds } from './personal-upstream';
+// Import dashboard-auth to initialize it
+import './dashboard-auth';
 
 // ── Parse CLI flags ──────────────────────────────────────────────────────────
 const args = process.argv.slice(2);
@@ -117,13 +122,16 @@ async function main() {
         console.log(`${CYAN}🛡️  Safety-net compaction enabled (auto-compact at 95% of model limit)${RESET}`);
     }
     await fetchAndCacheModelLimits(`http://localhost:${COPILOT_API_PORT}`);
+    
+    // 1.6 Pre-fetch and cache model pricing for cost tracking
+    await fetchAndCachePricing(`http://localhost:${COPILOT_API_PORT}`);
 
     const publicUrl = getPublicUrl();
     const cursorEndpoint = getCursorEndpoint();
     console.log(`${CYAN}🌐 Public URL: ${publicUrl}${RESET}`);
     console.log(`${CYAN}   Cursor endpoint: ${cursorEndpoint}${RESET}`);
 
-    // Auto-populate Cursor with all available cus-* models on every startup
+    // Register Copilot models as cus-* and optional personal (unprefixed) models
     let modelIds: string[] = [];
     try {
         const modelsResp = await fetch(`http://localhost:${COPILOT_API_PORT}/v1/models`, {
@@ -133,11 +141,32 @@ async function main() {
             const modelsData = await modelsResp.json() as { data?: Array<{ id?: string }> };
             modelIds = (modelsData.data || [])
                 .map(m => m.id)
-                .filter((id): id is string => typeof id === 'string' && id.startsWith('cus-'));
+                .filter((id): id is string => typeof id === 'string' && id.length > 0)
+                .map(id => withCopilotPrefix(normalizeModelId(id), COPILOT_MODEL_PREFIX));
         }
     } catch {}
 
-    if (modelIds.length > 0) {
+    const personal = getPersonalUpstream();
+    if (personal) {
+        try {
+            const personalResp = await fetch(personalModelsUrl(personal), {
+                headers: { Authorization: personalAuthHeader(personal) },
+            });
+            if (personalResp.ok) {
+                const personalData = await personalResp.json() as { data?: Array<{ id?: string }> };
+                for (const m of personalData.data || []) {
+                    if (typeof m.id === 'string' && m.id && !m.id.startsWith(COPILOT_MODEL_PREFIX)) {
+                        modelIds.push(m.id);
+                    }
+                }
+            }
+        } catch {}
+        modelIds.push(...extraPersonalModelIds());
+        modelIds = [...new Set(modelIds)];
+        console.log(`${CYAN}👤 Personal upstream: ${personal.baseUrl}${RESET}`);
+    }
+
+    if (shouldAutoConfigureCursor() && modelIds.length > 0) {
         const result = configureCursorOpenAIBaseUrl(cursorEndpoint, modelIds);
         if (result.ok) {
             console.log(`${GREEN}✅ ${result.message}${RESET}`);

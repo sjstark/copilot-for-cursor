@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  copilot-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: copilot-for-cursor
+    ports:
+      - "4142:4142"  # Proxy port
+    environment:
+      # Public URL for Cursor configuration
+      - PUBLIC_URL=${PUBLIC_URL:-https://copilot-for-cursor.samstark.me}
+      # Disable auto-configure in Docker (manual setup required)
+      - CURSOR_AUTO_CONFIGURE=0
+      # Optional: unprefixed models → personal OpenAI-compatible API
+      # - CURSOR_UPSTREAM_URL=${CURSOR_UPSTREAM_URL:-}
+      # - CURSOR_UPSTREAM_KEY=${CURSOR_UPSTREAM_KEY:-}
+      # Data directory for persistence
+      - DATA_DIR=/app/data
+    volumes:
+      # Persist usage data and configuration
+      - copilot-data:/app/data
+      # Optional: mount GitHub token for copilot-api auth
+      # - ~/.copilot-api:/home/bunuser/.copilot-api:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:4142/api/usage').then(r => r.ok ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - copilot-network
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  copilot-data:
+    driver: local
+
+networks:
+  copilot-network:
+    driver: bridge

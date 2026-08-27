@@ -6,8 +6,13 @@ import { addRequestLog, getNextRequestId, getUsageStats, flushToDisk, type Reque
 import { loadAuthConfig, saveAuthConfig, generateApiKey, validateApiKey } from './auth-config';
 import { getUpstreamAuthHeader, getUpstreamApiKeys, createUpstreamApiKey, deleteUpstreamApiKey } from './upstream-auth';
 import { compactIfNeeded, isMaxMode } from './max-mode';
-import { needsResponsesAPI, normalizeModelId, resolveModelForUpstream, needsLowReasoningEffort } from './model-routing';
+import { needsResponsesAPI, normalizeModelId, resolveModelForUpstream, needsLowReasoningEffort, COPILOT_MODEL_PREFIX, isCopilotRoutedModel, withCopilotPrefix } from './model-routing';
+import { getPersonalUpstream, personalAuthHeader, joinUpstreamPath, personalModelsUrl, extraPersonalModelIds } from './personal-upstream';
 import { getTunnelState, configureCursor, subscribeTunnel } from './tunnel';
+import { getBudgetStatus, checkBudgetExceeded } from './cost-tracking';
+import { retryFetch } from './retry-logic';
+import { selectModel, getRoutingConfig, setRoutingConfig } from './smart-router';
+import { isPasswordSet, createAuthSession, checkAuthSession, destroyAuthSession, getAuthStatus, resetPassword as resetDashboardPassword } from './dashboard-auth';
 
 // ── Console capture for SSE streaming ─────────────────────────────────────────
 interface ConsoleLine {
@@ -42,12 +47,137 @@ console.warn = (...args: any[]) => { origWarn(...args); addConsoleLine('WARN', a
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT = 4142;
 const TARGET_URL = "http://localhost:4141";
-const PREFIX = "cus-";
+const PREFIX = COPILOT_MODEL_PREFIX;
+const personalUpstream = getPersonalUpstream();
 let responseCounter = 0;
 
 console.log(`🚀 Proxy Router running on http://localhost:${PORT}`);
-console.log(`🔗 Forwarding to ${TARGET_URL}`);
-console.log(`🏷️  Prefix: "${PREFIX}"`);
+console.log(`🔗 Copilot (${PREFIX}*): ${TARGET_URL}`);
+if (personalUpstream) {
+    console.log(`👤 Personal (no prefix): ${personalUpstream.baseUrl}`);
+} else {
+    console.log(`👤 Personal routing off — unprefixed models still go to Copilot`);
+    console.log(`   Set CURSOR_UPSTREAM_URL + CURSOR_UPSTREAM_KEY to split personal vs work`);
+}
+
+function shouldUseCopilot(model: unknown): boolean {
+    if (!personalUpstream) return true;
+    return isCopilotRoutedModel(typeof model === 'string' ? model : '', PREFIX);
+}
+
+function prefixCopilotModelList(data: any): any {
+    if (data?.data && Array.isArray(data.data)) {
+        data.data = data.data.map((model: any) => {
+            const normalizedId = normalizeModelId(model.id);
+            return {
+                ...model,
+                id: withCopilotPrefix(normalizedId, PREFIX),
+                display_name: PREFIX + normalizeModelId(model.display_name || model.id),
+            };
+        });
+    }
+    return data;
+}
+
+async function fetchPersonalModelEntries(): Promise<any[]> {
+    const extras = extraPersonalModelIds().map(id => ({ id, display_name: id }));
+    if (!personalUpstream) return extras;
+    try {
+        const response = await fetch(personalModelsUrl(personalUpstream), {
+            headers: { Authorization: personalAuthHeader(personalUpstream) },
+        });
+        if (!response.ok) return extras;
+        const data = await response.json() as { data?: any[] };
+        const fromApi = Array.isArray(data.data) ? data.data : [];
+        return [...fromApi, ...extras];
+    } catch {
+        return extras;
+    }
+}
+
+async function mergeModelsResponse(copilotData: any): Promise<any> {
+    const merged = prefixCopilotModelList(copilotData || { data: [] });
+    if (!personalUpstream) return merged;
+    if (!Array.isArray(merged.data)) merged.data = [];
+    const seen = new Set(merged.data.map((m: any) => m.id));
+    for (const model of await fetchPersonalModelEntries()) {
+        const id = typeof model?.id === 'string' ? model.id : '';
+        if (!id || isCopilotRoutedModel(id, PREFIX) || seen.has(id)) continue;
+        seen.add(id);
+        merged.data.push({ ...model, id, display_name: model.display_name || id });
+    }
+    return merged;
+}
+
+async function forwardToPersonal(req: Request, url: URL, json: any, startTime: number): Promise<Response> {
+    const upstream = personalUpstream!;
+    const target = joinUpstreamPath(upstream.baseUrl, url.pathname, url.search);
+    const model = typeof json?.model === 'string' ? json.model : 'unknown';
+    console.log(`👤 Personal route: ${model} → ${target.toString()}`);
+
+    if (url.pathname.includes('/chat/completions') && json && typeof json === 'object') {
+        const isClaude = String(json.model || '').toLowerCase().includes('claude');
+        normalizeRequest(json, isClaude);
+    }
+
+    const headers = new Headers(req.headers);
+    headers.set('host', target.host);
+    headers.set('authorization', personalAuthHeader(upstream));
+    const body = JSON.stringify(json);
+    headers.set('content-length', String(new TextEncoder().encode(body).length));
+
+    const retryResult = await retryFetch(target.toString(), {
+        method: req.method,
+        headers,
+        body,
+    });
+
+    if (!retryResult.success) {
+        console.error(`❌ Personal upstream failed after ${retryResult.attempts} attempts:`, retryResult.error);
+        addRequestLog({
+            id: getNextRequestId(), timestamp: startTime, model,
+            promptTokens: 0, completionTokens: 0, totalTokens: 0,
+            status: 502, duration: retryResult.totalDuration, stream: !!json?.stream,
+        });
+        return new Response(
+            JSON.stringify({ error: { message: `Personal upstream failed: ${retryResult.error?.message || 'Unknown error'}`, type: 'proxy_error' } }),
+            { status: 502, headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' } },
+        );
+    }
+
+    const response = retryResult.result!;
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
+
+    if (!response.ok) {
+        const errText = await response.text();
+        console.error(`❌ Personal upstream error (${response.status}):`, errText);
+        addRequestLog({
+            id: getNextRequestId(), timestamp: startTime, model,
+            promptTokens: 0, completionTokens: 0, totalTokens: 0,
+            status: response.status, duration: Date.now() - startTime, stream: !!json?.stream,
+        });
+        return new Response(errText, { status: response.status, headers: responseHeaders });
+    }
+
+    if (json?.stream && response.body) {
+        return createStreamProxy(response.body, responseHeaders, (usage) => {
+            addRequestLog({
+                id: getNextRequestId(), timestamp: startTime, model,
+                promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+                totalTokens: usage.totalTokens,
+                status: response.status, duration: Date.now() - startTime, stream: true,
+            });
+        });
+    }
+
+    addRequestLog({
+        id: getNextRequestId(), timestamp: startTime, model,
+        promptTokens: 0, completionTokens: 0, totalTokens: 0,
+        status: response.status, duration: Date.now() - startTime, stream: false,
+    });
+    return new Response(response.body, { status: response.status, headers: responseHeaders });
+}
 
 Bun.serve({
   port: PORT,
@@ -65,10 +195,82 @@ Bun.serve({
         return new Response("Dashboard not found.", { status: 404 });
       }
     }
+    
+    // ── Dashboard Auth API ────────────────────────────────────────────
+    if (url.pathname === "/api/auth/status") {
+        return Response.json(getAuthStatus(), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+    }
+    
+    if (url.pathname === "/api/auth/login" && req.method === "POST") {
+        try {
+            const { password } = await req.json();
+            const sessionToken = createAuthSession(password);
+            
+            if (sessionToken) {
+                return Response.json({ 
+                    ok: true, 
+                    sessionToken,
+                    message: 'Login successful'
+                }, {
+                    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+                });
+            } else {
+                return Response.json({ 
+                    ok: false, 
+                    error: 'Invalid password'
+                }, {
+                    status: 401,
+                    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+                });
+            }
+        } catch (e: any) {
+            return Response.json({ 
+                ok: false, 
+                error: e.message || 'Authentication failed'
+            }, {
+                status: 400,
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            });
+        }
+    }
+    
+    if (url.pathname === "/api/auth/logout" && req.method === "POST") {
+        try {
+            const { sessionToken } = await req.json();
+            if (sessionToken) {
+                destroyAuthSession(sessionToken);
+            }
+            return Response.json({ ok: true }, {
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            });
+        } catch {
+            return Response.json({ ok: false }, {
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            });
+        }
+    }
+    
+    if (url.pathname === "/api/auth/verify" && req.method === "POST") {
+        try {
+            const { sessionToken } = await req.json();
+            const valid = checkAuthSession(sessionToken);
+            return Response.json({ valid }, {
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            });
+        } catch {
+            return Response.json({ valid: false }, {
+                headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+            });
+        }
+    }
 
     // ── Dashboard API: usage stats ────────────────────────────────────────
     if (url.pathname === "/api/usage") {
-        return new Response(JSON.stringify(getUsageStats()), {
+        const stats = getUsageStats();
+        const budget = getBudgetStatus();
+        return new Response(JSON.stringify({ ...stats, budget }), {
             headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
     }
@@ -172,6 +374,17 @@ Bun.serve({
         saveAuthConfig(config);
         return Response.json({ ok: true }, { headers: corsHeaders });
     }
+    
+    // ── Smart routing configuration ──────────────────────────────────────
+    if (url.pathname === "/api/settings/routing" && req.method === "GET") {
+        return Response.json(getRoutingConfig(), { headers: corsHeaders });
+    }
+    
+    if (url.pathname === "/api/settings/routing" && req.method === "PUT") {
+        const config = await req.json();
+        setRoutingConfig(config);
+        return Response.json({ ok: true }, { headers: corsHeaders });
+    }
 
     // ── Upstream (copilot-api) key management ────────────────────────
     if (url.pathname === "/api/upstream-keys" && req.method === "GET") {
@@ -252,17 +465,7 @@ Bun.serve({
             const response = await fetch(modelsUrl.toString(), {
                 headers: { 'Authorization': getUpstreamAuthHeader() },
             });
-            const data = await response.json();
-            if (data.data && Array.isArray(data.data)) {
-                data.data = data.data.map((model: any) => {
-                    const normalizedId = normalizeModelId(model.id);
-                    return {
-                        ...model,
-                        id: PREFIX + normalizedId,
-                        display_name: PREFIX + normalizeModelId(model.display_name || model.id)
-                    };
-                });
-            }
+            const data = await mergeModelsResponse(await response.json());
             return new Response(JSON.stringify(data), {
                 status: response.status,
                 headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
@@ -298,19 +501,51 @@ Bun.serve({
                 );
             }
         }
+        
+        // ── Check budget limits ───────────────────────────────────────────────
+        if (checkBudgetExceeded()) {
+            return Response.json(
+                { error: { message: "Budget limit exceeded. Please check your dashboard.", type: "budget_exceeded" } },
+                { status: 429, headers: { "Access-Control-Allow-Origin": "*" } }
+            );
+        }
     }
 
     try {
+      const isV1JsonPost = req.method === "POST"
+        && url.pathname.startsWith("/v1/")
+        && (req.headers.get("content-type") || "").includes("json");
+      let parsedJson: any | undefined;
+      if (isV1JsonPost) {
+        parsedJson = await req.json();
+        if (personalUpstream && parsedJson && !shouldUseCopilot(parsedJson.model)) {
+          return await forwardToPersonal(req, url, parsedJson, Date.now());
+        }
+      }
+
       if (req.method === "POST" && url.pathname.includes("/chat/completions")) {
         const startTime = Date.now();
-        let json = await req.json();
+        let json = parsedJson ?? await req.json();
 
         logIncomingRequest(json);
 
+        if (personalUpstream && !shouldUseCopilot(json.model)) {
+          return await forwardToPersonal(req, url, json, startTime);
+        }
+
         const originalModel = json.model;
+        
+        // ── Smart routing (optional) ──────────────────────────────────────
+        const routingDecision = selectModel(originalModel, json.messages || []);
+        if (routingDecision.selectedModel !== originalModel) {
+            console.log(`🎯 Smart routing: ${originalModel} → ${routingDecision.selectedModel}`);
+            console.log(`   Reason: ${routingDecision.reason}`);
+            json.model = routingDecision.selectedModel;
+        }
+        
         const targetModel = resolveModelForUpstream(json.model || '', PREFIX);
         json.model = targetModel;
-        if (originalModel !== targetModel) {
+        if (originalModel !== targetModel && routingDecision.selectedModel === originalModel) {
           console.log(`🔄 Rewriting model: ${originalModel} -> ${targetModel}`);
         }
 
@@ -376,11 +611,29 @@ Bun.serve({
         const body = JSON.stringify(json);
         headers.set("content-length", String(new TextEncoder().encode(body).length));
 
-        const response = await fetch(targetUrl.toString(), {
+        const retryResult = await retryFetch(targetUrl.toString(), {
           method: "POST",
           headers: headers,
           body: body,
         });
+
+        if (!retryResult.success) {
+            console.error(`❌ All retries failed after ${retryResult.attempts} attempts:`, retryResult.error);
+            addRequestLog({
+                id: getNextRequestId(), timestamp: startTime, model: targetModel,
+                promptTokens: 0, completionTokens: 0, totalTokens: 0,
+                status: 502, duration: retryResult.totalDuration, stream: !!json.stream,
+            });
+            return new Response(
+                JSON.stringify({ error: { message: `All retries exhausted: ${retryResult.error?.message || 'Unknown error'}`, type: "proxy_error" } }),
+                { status: 502, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }
+            );
+        }
+
+        const response = retryResult.result!;
+        if (retryResult.attempts > 1) {
+            console.log(`✅ Request succeeded after ${retryResult.attempts} attempts (${retryResult.totalDuration}ms total)`);
+        }
 
         const responseHeaders = new Headers(response.headers);
         responseHeaders.set("Access-Control-Allow-Origin", "*");
@@ -436,18 +689,7 @@ Bun.serve({
         headers.set("host", targetUrl.host);
         headers.set("authorization", getUpstreamAuthHeader());
         const response = await fetch(targetUrl.toString(), { method: "GET", headers: headers });
-        const data = await response.json();
-        
-        if (data.data && Array.isArray(data.data)) {
-          data.data = data.data.map((model: any) => {
-            const normalizedId = normalizeModelId(model.id);
-            return {
-                ...model,
-                id: PREFIX + normalizedId,
-                display_name: PREFIX + normalizeModelId(model.display_name || model.id)
-            };
-          });
-        }
+        const data = await mergeModelsResponse(await response.json());
         return new Response(JSON.stringify(data), {
             status: response.status,
             headers: { ...Object.fromEntries(response.headers), "Access-Control-Allow-Origin": "*" }
@@ -457,10 +699,14 @@ Bun.serve({
       const headers = new Headers(req.headers);
       headers.set("host", targetUrl.host);
       headers.set("authorization", getUpstreamAuthHeader());
+      const copilotBody = parsedJson !== undefined ? JSON.stringify(parsedJson) : req.body;
+      if (parsedJson !== undefined) {
+        headers.set("content-length", String(new TextEncoder().encode(copilotBody as string).length));
+      }
       const response = await fetch(targetUrl.toString(), {
         method: req.method,
         headers: headers,
-        body: req.body,
+        body: copilotBody,
       });
       const responseHeaders = new Headers(response.headers);
       responseHeaders.set("Access-Control-Allow-Origin", "*");

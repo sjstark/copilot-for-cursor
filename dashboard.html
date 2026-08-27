@@ -52,6 +52,114 @@ body {
     -webkit-font-smoothing: antialiased;
 }
 
+/* ── Auth Modal ─────────────────────────────────── */
+#auth-modal {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.95);
+    backdrop-filter: blur(10px);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fadeIn 0.3s;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.auth-box {
+    background: var(--bg-card-solid);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    padding: 40px;
+    max-width: 400px;
+    width: 90%;
+    box-shadow: var(--shadow);
+    animation: slideUp 0.3s;
+}
+
+@keyframes slideUp {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+.auth-box h2 {
+    font-size: 24px;
+    margin-bottom: 8px;
+    background: var(--grad);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+
+.auth-box p {
+    color: var(--text-dim);
+    font-size: 14px;
+    margin-bottom: 24px;
+}
+
+.auth-input {
+    width: 100%;
+    padding: 12px 16px;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 14px;
+    margin-bottom: 16px;
+    transition: border-color 0.2s;
+}
+
+.auth-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.auth-btn {
+    width: 100%;
+    padding: 12px;
+    background: var(--grad);
+    border: none;
+    border-radius: var(--radius-sm);
+    color: white;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.auth-btn:hover {
+    transform: translateY(-1px);
+}
+
+.auth-btn:active {
+    transform: translateY(0);
+}
+
+.auth-error {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid var(--red);
+    color: var(--red);
+    padding: 12px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+}
+
+.auth-hint {
+    margin-top: 16px;
+    padding: 12px;
+    background: rgba(124, 140, 255, 0.1);
+    border: 1px solid rgba(124, 140, 255, 0.3);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-dim);
+}
+
 /* ── Header ─────────────────────────────────────── */
 .header {
     display: flex;
@@ -498,13 +606,31 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 </head>
 <body>
 
+<!-- Auth Modal -->
+<div id="auth-modal" style="display: none;">
+    <div class="auth-box">
+        <h2 id="auth-title">Set Dashboard Password</h2>
+        <p id="auth-message">Protect your dashboard with a password. You'll need this to access the dashboard in the future.</p>
+        <div id="auth-error" class="auth-error"></div>
+        <input type="password" id="auth-password" class="auth-input" placeholder="Enter password" autocomplete="current-password">
+        <input type="password" id="auth-confirm" class="auth-input" placeholder="Confirm password" style="display: none;" autocomplete="new-password">
+        <button class="auth-btn" onclick="handleAuth()">Continue</button>
+        <div class="auth-hint" id="auth-hint" style="display: none;">
+            💡 <strong>Tip:</strong> This password is stored on the server and shared by all users. Anyone with this password can access the dashboard.
+        </div>
+    </div>
+</div>
+
 <!-- Header -->
 <div class="header">
     <div class="header-title">
         <span class="dot"></span>
         <span class="brand">Copilot for Cursor</span>
     </div>
-    <span class="header-badge">localhost:4142</span>
+    <div style="display: flex; gap: 12px; align-items: center;">
+        <span class="header-badge">localhost:4142</span>
+        <button onclick="logout()" style="background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 12px; cursor: pointer; transition: background 0.2s;" onmouseover="this.style.background='rgba(255,255,255,0.15)'" onmouseout="this.style.background='rgba(255,255,255,0.1)'">🔒 Logout</button>
+    </div>
 </div>
 
 <!-- Tabs -->
@@ -637,6 +763,16 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
                 <div class="card-label">Total Tokens</div>
                 <div class="card-value num" id="stat-total">0</div>
             </div>
+            <div class="card">
+                <div class="card-label">Estimated Cost (Lifetime)</div>
+                <div class="card-value num" id="stat-cost" style="color: var(--green);">$0.00</div>
+            </div>
+        </div>
+        
+        <!-- Budget Status -->
+        <div id="budget-alert" style="display:none; background: rgba(251, 146, 60, 0.1); border: 1px solid var(--orange); border-radius: 12px; padding: 16px; margin-bottom: 24px;">
+            <div style="color: var(--orange); font-weight: 600; margin-bottom: 8px;">⚠️ Budget Alert</div>
+            <div id="budget-alert-message" style="color: var(--text-dim); font-size: 13px;"></div>
         </div>
 
         <div class="persistence-bar" id="persistence-bar" style="display:none">
@@ -655,6 +791,7 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
                         <th>Prompt Tokens</th>
                         <th>Completion Tokens</th>
                         <th>Total Tokens</th>
+                        <th>Cost</th>
                         <th>Errors</th>
                     </tr>
                 </thead>
@@ -672,6 +809,7 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
                         <th>Prompt Tokens</th>
                         <th>Completion Tokens</th>
                         <th>Avg Duration</th>
+                        <th>Est. Cost</th>
                         <th>Errors</th>
                     </tr>
                 </thead>
@@ -688,6 +826,7 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
                         <th>Model</th>
                         <th>Prompt</th>
                         <th>Completion</th>
+                        <th>Cost</th>
                         <th>Duration</th>
                         <th>Time</th>
                     </tr>
@@ -765,6 +904,190 @@ input[type="text"]:focus, input[type="password"]:focus, select:focus {
 </div>
 
 <script>
+/* ── Authentication (Server-Side) ────────────────────────────────────────── */
+const SESSION_KEY = 'dashboard-session-token';
+
+async function checkAuth() {
+    // Check if we have a stored session token
+    const sessionToken = localStorage.getItem(SESSION_KEY);
+    
+    if (sessionToken) {
+        // Verify with server
+        try {
+            const resp = await fetch('/api/auth/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionToken })
+            });
+            const { valid } = await resp.json();
+            if (valid) {
+                return true; // Already authenticated
+            }
+        } catch {}
+        // Invalid/expired token, remove it
+        localStorage.removeItem(SESSION_KEY);
+    }
+    
+    // Check if password is set on server
+    try {
+        const resp = await fetch('/api/auth/status');
+        const { passwordSet } = await resp.json();
+        showAuthModal(passwordSet ? 'login' : 'setup');
+    } catch {
+        showAuthModal('setup');
+    }
+    
+    return false;
+}
+
+function showAuthModal(mode) {
+    const modal = document.getElementById('auth-modal');
+    const title = document.getElementById('auth-title');
+    const message = document.getElementById('auth-message');
+    const confirm = document.getElementById('auth-confirm');
+    const hint = document.getElementById('auth-hint');
+    const password = document.getElementById('auth-password');
+    
+    if (mode === 'setup') {
+        title.textContent = 'Set Dashboard Password';
+        message.textContent = 'This is the first time anyone is accessing this dashboard. Set a password that everyone will use.';
+        confirm.style.display = 'block';
+        hint.style.display = 'block';
+    } else {
+        title.textContent = 'Dashboard Login';
+        message.textContent = 'Enter the dashboard password to continue.';
+        confirm.style.display = 'none';
+        hint.style.display = 'none';
+    }
+    
+    modal.style.display = 'flex';
+    password.value = '';
+    confirm.value = '';
+    password.focus();
+    
+    // Enter key handler
+    password.onkeypress = confirm.onkeypress = (e) => {
+        if (e.key === 'Enter') handleAuth();
+    };
+}
+
+async function handleAuth() {
+    const password = document.getElementById('auth-password').value;
+    const confirm = document.getElementById('auth-confirm').value;
+    const error = document.getElementById('auth-error');
+    
+    error.style.display = 'none';
+    
+    if (!password) {
+        error.textContent = 'Please enter a password';
+        error.style.display = 'block';
+        return;
+    }
+    
+    // Check if this is setup mode (confirm field visible)
+    const isSetup = document.getElementById('auth-confirm').style.display !== 'none';
+    
+    if (isSetup) {
+        if (password.length < 6) {
+            error.textContent = 'Password must be at least 6 characters';
+            error.style.display = 'block';
+            return;
+        }
+        
+        if (password !== confirm) {
+            error.textContent = 'Passwords do not match';
+            error.style.display = 'block';
+            return;
+        }
+    }
+    
+    // Send to server
+    try {
+        const resp = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+        });
+        
+        if (!resp.ok) {
+            const data = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+            error.textContent = data.error || `Server error: ${resp.status}`;
+            error.style.display = 'block';
+            console.error('Auth error:', resp.status, data);
+            return;
+        }
+        
+        const data = await resp.json();
+        
+        if (data.ok) {
+            // Store session token
+            localStorage.setItem(SESSION_KEY, data.sessionToken);
+            document.getElementById('auth-modal').style.display = 'none';
+            initDashboard();
+        } else {
+            error.textContent = data.error || 'Invalid password';
+            error.style.display = 'block';
+        }
+    } catch (e) {
+        console.error('Auth request failed:', e);
+        error.textContent = 'Connection error. Is the server running? Check console for details.';
+        error.style.display = 'block';
+    }
+}
+
+async function logout() {
+    const sessionToken = localStorage.getItem(SESSION_KEY);
+    if (sessionToken) {
+        try {
+            await fetch('/api/auth/logout', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionToken })
+            });
+        } catch {}
+    }
+    localStorage.removeItem(SESSION_KEY);
+    location.reload();
+}
+
+function resetPassword() {
+    if (!confirm('Reset dashboard password? Everyone will need to set a new password on next visit.')) {
+        return;
+    }
+    
+    fetch('/api/auth/reset', { method: 'POST' })
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                alert('Password reset successfully. Please reload and set a new password.');
+                localStorage.removeItem(SESSION_KEY);
+                location.reload();
+            } else {
+                alert('Failed to reset password: ' + (data.error || 'Unknown error'));
+            }
+        })
+        .catch(e => {
+            alert('Failed to reset password: ' + e.message);
+        });
+}
+
+async function initDashboard() {
+    // Load all dashboard content
+    loadAuthConfigUI();
+    loadUpstreamKeys();
+    loadModels();
+    fetchUsage();
+    connectSSE();
+    loadTunnelInfo();
+}
+
+// Check auth on page load
+(async () => {
+    if (await checkAuth()) {
+        initDashboard();
+    }
+})();
+
 /* ── Tab switching ──────────────────────────────────────────── */
 const tabs = document.querySelectorAll('.tab');
 function switchTab(t) {
@@ -1025,6 +1348,16 @@ async function fetchUsage() {
         document.getElementById('stat-prompt').textContent = fmtNum(d.totalPromptTokens);
         document.getElementById('stat-completion').textContent = fmtNum(d.totalCompletionTokens);
         document.getElementById('stat-total').textContent = fmtNum(d.totalTokens);
+        document.getElementById('stat-cost').textContent = '$' + (d.totalCost || 0).toFixed(4);
+        
+        // Budget alerts
+        if (d.budget && d.budget.alerts && d.budget.alerts.length > 0) {
+            const alert = document.getElementById('budget-alert');
+            alert.style.display = 'block';
+            document.getElementById('budget-alert-message').textContent = d.budget.alerts.join('. ');
+        } else {
+            document.getElementById('budget-alert').style.display = 'none';
+        }
 
         // Persistence bar
         if (d.persistence) {
@@ -1061,6 +1394,7 @@ async function fetchUsage() {
                     '<td class="num">' + fmtNum(s.promptTokens) + '</td>' +
                     '<td class="num">' + fmtNum(s.completionTokens) + '</td>' +
                     '<td class="num">' + fmtNum(s.totalTokens) + '</td>' +
+                    '<td class="num" style="color:var(--green)">$' + (s.totalCost || 0).toFixed(4) + '</td>' +
                     '<td class="num" style="color:' + (s.errors > 0 ? 'var(--red)' : 'var(--text-dim)') + '">' + s.errors + '</td>';
                 dBody.appendChild(tr);
             });
@@ -1079,6 +1413,7 @@ async function fetchUsage() {
                 '<td class="num">' + fmtNum(m.promptTokens) + '</td>' +
                 '<td class="num">' + fmtNum(m.completionTokens) + '</td>' +
                 '<td class="num">' + m.avgDuration + 'ms</td>' +
+                '<td class="num" style="color:var(--green)">$' + (m.totalCost || 0).toFixed(4) + '</td>' +
                 '<td class="num" style="color:' + (m.errors > 0 ? 'var(--red)' : 'var(--text-dim)') + '">' + m.errors + '</td>';
             mBody.appendChild(tr);
         });
@@ -1088,12 +1423,14 @@ async function fetchUsage() {
         rBody.innerHTML = '';
         (d.recentRequests || []).forEach(r => {
             const ok = r.status < 400;
+            const cost = r.cost ? r.cost.totalCost : 0;
             const tr = document.createElement('tr');
             tr.innerHTML =
                 '<td><span class="status-dot ' + (ok ? 'ok' : 'err') + '"></span></td>' +
                 '<td><span class="model-badge">' + esc(r.model) + '</span></td>' +
                 '<td class="num">' + fmtNum(r.promptTokens) + '</td>' +
                 '<td class="num">' + fmtNum(r.completionTokens) + '</td>' +
+                '<td class="num" style="color:var(--green)">$' + cost.toFixed(5) + '</td>' +
                 '<td class="num">' + r.duration + 'ms</td>' +
                 '<td style="color:var(--text-dim)">' + timeAgo(r.timestamp) + '</td>';
             rBody.appendChild(tr);
@@ -1116,11 +1453,11 @@ async function flushUsage() {
     }
 }
 
+// NOTE: Removed auto-execution - now called via initDashboard() after auth
 // Auto-refresh usage every 5s when tab is active
 setInterval(() => {
     if (document.getElementById('tab-usage').classList.contains('active')) fetchUsage();
 }, 5000);
-fetchUsage();
 
 /* ── Tab 3: Console ─────────────────────────────────────────── */
 const output = document.getElementById('console-output');

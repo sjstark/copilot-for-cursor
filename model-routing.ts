@@ -20,13 +20,25 @@ export function normalizeModelId(model: string): string {
     return model.replace(/(\d)-(\d)/g, '$1.$2');
 }
 
+export const COPILOT_MODEL_PREFIX = 'cus-';
+
+/** True when Cursor asked for a Copilot (work) model via the `cus-` prefix. */
+export function isCopilotRoutedModel(model: string, prefix = COPILOT_MODEL_PREFIX): boolean {
+    return typeof model === 'string' && model.startsWith(prefix);
+}
+
+/** Prefix a Copilot model id unless it already has one. */
+export function withCopilotPrefix(model: string, prefix = COPILOT_MODEL_PREFIX): string {
+    return isCopilotRoutedModel(model, prefix) ? model : prefix + model;
+}
+
 /** Strip the Cursor proxy prefix (e.g. "cus-") if present. */
-export function stripModelPrefix(model: string, prefix = 'cus-'): string {
+export function stripModelPrefix(model: string, prefix = COPILOT_MODEL_PREFIX): string {
     return model.startsWith(prefix) ? model.slice(prefix.length) : model;
 }
 
 /** Resolve the model ID to send upstream: strip prefix + normalize version dashes. */
-export function resolveModelForUpstream(model: string, prefix = 'cus-'): string {
+export function resolveModelForUpstream(model: string, prefix = COPILOT_MODEL_PREFIX): string {
     return normalizeModelId(stripModelPrefix(model, prefix));
 }
 

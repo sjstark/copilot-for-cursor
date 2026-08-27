@@ -6,6 +6,8 @@ import {
     needsLowReasoningEffort,
     needsResponsesAPI,
     isFableModel,
+    isCopilotRoutedModel,
+    withCopilotPrefix,
 } from './model-routing';
 
 describe('normalizeModelId', () => {
@@ -17,6 +19,28 @@ describe('normalizeModelId', () => {
     it('leaves non-version dashes unchanged', () => {
         expect(normalizeModelId('gpt-5-mini')).toBe('gpt-5-mini');
         expect(normalizeModelId('gpt-5.3-codex')).toBe('gpt-5.3-codex');
+    });
+});
+
+describe('stripModelPrefix', () => {
+    it('strips only a leading cus- prefix', () => {
+        expect(stripModelPrefix('cus-gpt-5.4')).toBe('gpt-5.4');
+        expect(stripModelPrefix('gpt-5.4')).toBe('gpt-5.4');
+    });
+});
+
+describe('isCopilotRoutedModel', () => {
+    it('routes only cus- prefixed ids to Copilot', () => {
+        expect(isCopilotRoutedModel('cus-gpt-5.4')).toBe(true);
+        expect(isCopilotRoutedModel('gpt-5.4')).toBe(false);
+        expect(isCopilotRoutedModel('claude-sonnet-4.6')).toBe(false);
+    });
+});
+
+describe('withCopilotPrefix', () => {
+    it('adds the prefix once', () => {
+        expect(withCopilotPrefix('gpt-5.4')).toBe('cus-gpt-5.4');
+        expect(withCopilotPrefix('cus-gpt-5.4')).toBe('cus-gpt-5.4');
     });
 });
 
